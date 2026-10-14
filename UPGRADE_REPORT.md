@@ -17,13 +17,13 @@ This upgrade continues from the supplied TalentGraph Node.js/Express project. Ex
 - Optional Resend-compatible email delivery using `RESEND_API_KEY` and `EMAIL_FROM`.
 - HR audit log for evidence decisions, invitations and company settings.
 - Serialized persistence writes and production startup validation for a 32-character session secret.
-- Existing employee cap, domain validation, email verification and employee-specific graph authorization retained.
+- Existing employee cap, domain validation, immediate employee signup, Google OAuth sign-in/signup and employee-specific graph authorization retained.
 
 ## Verification performed
 
 - `node --check server.js` — passed.
 - `node --check public/app.js` — passed.
-- `npm test` — 6/6 tests passed, covering sample-data limits, employee-specific profile/graph access, signup verification, course-to-evidence workflow, HR review notifications/audit, single-use invitations and company settings.
+- `npm test` — 6/6 tests passed, covering sample-data limits, employee-specific profile/graph access, signup without email verification, Google OAuth configuration handling, course-to-evidence workflow, HR review notifications/audit, single-use invitations and company settings.
 
 Tests run in isolated temporary copies with local JSON storage. A real MySQL instance and a browser automation environment were not configured, so those checks were not run.
 

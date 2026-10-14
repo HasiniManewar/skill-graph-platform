@@ -197,6 +197,15 @@ async function initialize() {
   let migrated = false;
   state.notifications ||= []; state.evidenceTasks ||= []; state.invitations ||= []; state.auditLog ||= [];
   state.companySettings ||= { evidenceDueDays: process.env.EVIDENCE_DUE_DAYS ? Number(process.env.EVIDENCE_DUE_DAYS) : null, allowedEmailDomains: [...allowedEmailDomains] };
+  for (const user of state.users) {
+    if (user.verified === false) {
+      user.verified = true;
+      delete user.verificationTokenHash;
+      delete user.verificationExpiresAt;
+      if (!state.employees.some((employee) => employee.userId === user.id)) createLinkedEmployee(user);
+      migrated = true;
+    }
+  }
   if (Array.isArray(state.companySettings.allowedEmailDomains) && state.companySettings.allowedEmailDomains.length) { allowedEmailDomains.clear(); for (const domain of state.companySettings.allowedEmailDomains) if (/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) allowedEmailDomains.add(domain.toLowerCase()); }
   // Keep all account-linked employee profiles; cap only fictional, unlinked seed profiles at 100.
   const linkedEmployees = state.employees.filter((employee) => employee.userId && state.users.some((user) => user.id === employee.userId));
@@ -277,6 +286,12 @@ function auth(requiredRole) {
 }
 function publicUser(user) { return { id: user.id, name: user.name, email: user.email, role: user.role }; }
 function employeeFor(user) { return state.employees.find((person) => person.userId === user.id) || null; }
+function createLinkedEmployee(user) {
+  const employee = createEmployee(state.employees.length);
+  Object.assign(employee, { id: `emp-${crypto.randomUUID().slice(0, 8)}`, name: user.name, email: user.email, userId: user.id, skills: [], projects: [], certifications: [], workload: 0, availability: 'Available', evidence: 'New profile — no skills or evidence verified yet.' });
+  state.employees.push(employee);
+  return employee;
+}
 function learningFor(user) { return state.learning[user.id] ||= { completed: [], accumulatedSeconds: 0, sessionStartedAt: null, assessmentScore: null, projectScore: null, certified: false }; }
 function levelValue(level) { return levels.indexOf(level); }
 function queryRequirements(query) {
@@ -344,7 +359,7 @@ app.get('/api/session', (req, res) => {
   try {
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString());
     const user = state.users.find((entry) => entry.id === claims.sub);
-    if (!user || claims.exp < Date.now() || user.verified === false) return res.json({ user: null });
+    if (!user || claims.exp < Date.now()) return res.json({ user: null });
     return res.json({ user: publicUser(user) });
   } catch { return res.json({ user: null }); }
 });
@@ -357,34 +372,65 @@ app.post('/api/register', authRateLimit, async (req, res) => {
   if (state.users.some((user) => user.email.toLowerCase() === normalizedEmail)) return res.status(409).json({ error: 'An account with that email already exists.' });
   // Public registration is employee-only. HR access must be provisioned by an authorized administrator.
   const userId = crypto.randomUUID();
-  const verificationToken = crypto.randomBytes(32).toString('base64url');
-  const user = { ...userRecord(userId, name.trim(), normalizedEmail, password, 'employee'), verified: false, verificationTokenHash: crypto.createHash('sha256').update(verificationToken).digest('hex'), verificationExpiresAt: Date.now() + 30 * 60 * 1000 };
+  const user = { ...userRecord(userId, name.trim(), normalizedEmail, password, 'employee'), verified: true };
   state.users.push(user);
+  createLinkedEmployee(user);
   await persist();
-  const baseUrl = process.env.APP_BASE_URL || `http://localhost:${port}`;
-  const response = { ok: true, requiresVerification: true, message: 'Account created. Verify your email before signing in.' };
-  // Local demo has no email provider, so expose a short-lived verification link only outside production.
-  if (!isProduction) response.developmentVerificationUrl = `${baseUrl}/api/verify-email?token=${encodeURIComponent(verificationToken)}`;
-  res.status(201).json(response);
+  res.cookie('session', tokenFor(user), { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 12 * 60 * 60 * 1000 });
+  res.status(201).json({ ok: true, user: publicUser(user) });
 });
-app.get('/api/verify-email', async (req, res) => {
-  const token = String(req.query.token || '');
-  if (!token || token.length > 256) return res.status(400).send('Invalid or expired verification link.');
-  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-  const user = state.users.find((entry) => entry.verified === false && entry.verificationTokenHash === tokenHash);
-  if (!user || user.verificationExpiresAt < Date.now()) return res.status(400).send('Invalid or expired verification link. Please register again or contact your administrator.');
-  user.verified = true; delete user.verificationTokenHash; delete user.verificationExpiresAt;
-  const employee = createEmployee(state.employees.length);
-  Object.assign(employee, { id: `emp-${crypto.randomUUID().slice(0, 8)}`, name: user.name, email: user.email, userId: user.id, skills: [], projects: [], certifications: [], workload: 0, availability: 'Available', evidence: 'New profile — no skills or evidence verified yet.' });
-  state.employees.push(employee);
-  await persist();
-  res.status(200).send('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Email verified</title></head><body style="font-family:system-ui;max-width:560px;margin:12vh auto;padding:24px;color:#183b28"><h1>Email verified</h1><p>Your employee account is verified. Return to the skillGraph sign-in page and log in.</p><a href="/">Go to sign in</a></body></html>');
+function googleRedirectUri(req) { return `${(process.env.APP_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '')}/auth/google/callback`; }
+function googleSetupError(res) { return res.status(503).type('html').send('<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in unavailable</title><body style="font:16px system-ui;max-width:560px;margin:12vh auto;padding:24px;color:#202c28"><h1>Google sign-in is not configured</h1><p>Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, then register the callback URL shown in the setup instructions.</p><a href="/">Return to skillGraph</a></body></html>'); }
+app.get('/auth/google', authRateLimit, (req, res) => {
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return googleSetupError(res);
+  const oauthState = crypto.randomBytes(32).toString('base64url');
+  res.cookie('google_oauth_state', oauthState, { httpOnly: true, sameSite: 'lax', secure: isProduction, maxAge: 10 * 60 * 1000, path: '/' });
+  const authorization = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  authorization.search = new URLSearchParams({ client_id: process.env.GOOGLE_CLIENT_ID, redirect_uri: googleRedirectUri(req), response_type: 'code', scope: 'openid email profile', state: oauthState }).toString();
+  res.redirect(302, authorization.toString());
+});
+app.get('/auth/google/callback', authRateLimit, async (req, res) => {
+  const oauthState = String(req.query.state || '');
+  const savedState = String(req.cookies.google_oauth_state || '');
+  res.clearCookie('google_oauth_state', { httpOnly: true, sameSite: 'lax', secure: isProduction, path: '/' });
+  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) return googleSetupError(res);
+  if (!oauthState || !savedState || oauthState.length !== savedState.length || !crypto.timingSafeEqual(Buffer.from(oauthState), Buffer.from(savedState))) return res.status(400).send('Google sign-in could not be validated. Return to skillGraph and try again.');
+  try {
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code: String(req.query.code || ''), client_id: process.env.GOOGLE_CLIENT_ID, client_secret: process.env.GOOGLE_CLIENT_SECRET, redirect_uri: googleRedirectUri(req), grant_type: 'authorization_code' }) });
+    if (!tokenResponse.ok) throw new Error('Google token exchange failed.');
+    const tokens = await tokenResponse.json();
+    const profileResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
+    if (!profileResponse.ok) throw new Error('Google profile lookup failed.');
+    const profile = await profileResponse.json();
+    const email = String(profile.email || '').trim().toLowerCase();
+    const domain = email.split('@')[1] || '';
+    if (!profile.id || profile.verified_email !== true || !/^\S+@\S+\.\S+$/.test(email)) throw new Error('Google did not provide a verified email address.');
+    if (!allowedEmailDomains.has(domain)) throw new Error(`This email domain is not approved for registration. Approved domains: ${[...allowedEmailDomains].join(', ') || 'none configured'}.`);
+    let user = state.users.find((entry) => entry.email.toLowerCase() === email);
+    if (user?.googleId && user.googleId !== profile.id) throw new Error('This email is already connected to a different Google account.');
+    if (!user) {
+      user = { ...userRecord(crypto.randomUUID(), String(profile.name || email.split('@')[0]).slice(0, 160), email, crypto.randomBytes(32).toString('hex'), 'employee'), verified: true, googleId: profile.id };
+      state.users.push(user);
+      createLinkedEmployee(user);
+    } else {
+      user.verified = true;
+      user.googleId = profile.id;
+      delete user.verificationTokenHash;
+      delete user.verificationExpiresAt;
+      if (user.role === 'employee' && !employeeFor(user)) createLinkedEmployee(user);
+    }
+    await persist();
+    res.cookie('session', tokenFor(user), { httpOnly: true, sameSite: 'lax', secure: isProduction, maxAge: 12 * 60 * 60 * 1000 });
+    res.redirect(303, '/');
+  } catch (error) {
+    const message = String(error.message).replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    res.status(400).type('html').send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Google sign-in failed</title><body style="font:16px system-ui;max-width:560px;margin:12vh auto;padding:24px;color:#202c28"><h1>Google sign-in failed</h1><p>${message}</p><a href="/">Return to skillGraph</a></body></html>`);
+  }
 });
 app.post('/api/login', authRateLimit, async (req, res) => {
   const { email, password } = req.body || {};
   const user = state.users.find((entry) => entry.email.toLowerCase() === String(email || '').toLowerCase());
   if (!user || !crypto.timingSafeEqual(Buffer.from(crypto.scryptSync(password || '', user.salt, 64).toString('hex')), Buffer.from(user.hash))) return res.status(401).json({ error: 'Email or password is incorrect.' });
-  if (user.verified === false) return res.status(403).json({ error: 'Please verify your email before signing in.' });
   res.cookie('session', tokenFor(user), { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 12 * 60 * 60 * 1000 });
   res.json({ user: publicUser(user) });
 });

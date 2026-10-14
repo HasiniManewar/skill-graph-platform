@@ -66,15 +66,14 @@ test('demo employee sees their own HR-backed profile and cannot inspect another 
   assert.equal(dashboard.status, 200); assert.equal(dashboard.json.employee.id, 'emp-001'); assert.equal(dashboard.json.employee.name, 'Priya Shah');
   const denied = await request(`${baseUrl}/api/employees/emp-002/graph`, { cookie }); assert.equal(denied.status, 403);
 });
-test('public signup rejects unapproved domains and verifies accounts before login', async () => {
+test('public signup rejects unapproved domains and signs up without email verification', async () => {
   const denied = await request(`${baseUrl}/api/register`, { method: 'POST', body: { name: 'Test User', email: 'test@gmail.com', password: 'StrongPass!23', confirmPassword: 'StrongPass!23', role: 'hr' } }); assert.equal(denied.status, 403);
   const accepted = await request(`${baseUrl}/api/register`, { method: 'POST', body: { name: 'Test User', email: 'test-new@skillgraph.test', password: 'StrongPass!23', confirmPassword: 'StrongPass!23', role: 'hr' } });
-  assert.equal(accepted.status, 201); assert.equal(accepted.json.requiresVerification, true); assert.ok(accepted.json.developmentVerificationUrl);
-  const prematureLogin = await request(`${baseUrl}/api/login`, { method: 'POST', body: { email: 'test-new@skillgraph.test', password: 'StrongPass!23' } }); assert.equal(prematureLogin.status, 403);
-  const verified = await request(accepted.json.developmentVerificationUrl); assert.equal(verified.status, 200);
+  assert.equal(accepted.status, 201); assert.equal(accepted.json.user.email, 'test-new@skillgraph.test'); assert.equal(accepted.json.requiresVerification, undefined); assert.match(accepted.headers['set-cookie'][0], /^session=/);
   const login = await request(`${baseUrl}/api/login`, { method: 'POST', body: { email: 'test-new@skillgraph.test', password: 'StrongPass!23' } }); assert.equal(login.status, 200);
   const cookie = login.headers['set-cookie'][0].split(';')[0]; const dashboard = await request(`${baseUrl}/api/dashboard`, { cookie });
   assert.equal(dashboard.json.employee.skills.length, 0); assert.equal(dashboard.json.employee.projects.length, 0);
+  const google = await request(`${baseUrl}/auth/google`); assert.equal(google.status, 503); assert.match(google.text, /Google sign-in is not configured/);
 });
 test('course completion creates persisted evidence task; submission and HR review notify the right employee', async () => {
   const employeeLogin = await request(`${baseUrl}/api/login`, { method: 'POST', body: { email: 'employee@skillgraph.test', password: 'DemoPass!23' } });

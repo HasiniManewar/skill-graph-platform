@@ -56,13 +56,20 @@ $env:EMAIL_FROM = "TalentGraph <noreply@your-verified-domain.com>"
 $env:APP_BASE_URL = "https://your-deployment.example"
 ```
 
-For production, also set `NODE_ENV=production`, a random `SESSION_SECRET` of at least 32 characters, and `COMPANY_EMAIL_DOMAINS` (comma-separated domains). Production startup intentionally fails if a strong session secret is missing. Public registration remains employee-only and requires email verification; HR accounts are not created by public signup.
+To enable Google sign-in and signup, create a Google OAuth web client and register `${APP_BASE_URL}/auth/google/callback` as an authorized redirect URI. Set its credentials:
+
+```powershell
+$env:GOOGLE_CLIENT_ID = "your-google-oauth-client-id"
+$env:GOOGLE_CLIENT_SECRET = "your-google-oauth-client-secret"
+```
+
+Google accounts must have a verified email on a domain listed in `COMPANY_EMAIL_DOMAINS`. First-time Google sign-in creates an employee account; returning Google users are signed in to the matching account. For production, also set `NODE_ENV=production`, a random `SESSION_SECRET` of at least 32 characters, and `COMPANY_EMAIL_DOMAINS` (comma-separated domains). Production startup intentionally fails if a strong session secret is missing. Public registration is employee-only; HR accounts are not created by public signup.
 
 ## Security and implementation limits
 
 - Passwords use salted `scrypt` hashes. Sessions use signed, HTTP-only, SameSite cookies; protected endpoints check roles and employee ownership.
 - Login, signup and invitation acceptance have per-process rate limits. These limits are not distributed across multiple app instances.
-- Email verification and invitations use expiring, hashed, single-use tokens. Real email delivery requires a configured provider.
+- Invitations use expiring, hashed, single-use tokens. Real email delivery requires a configured provider.
 - Evidence submissions currently store a title, description and optional HTTPS link; binary file uploads and malware scanning are not implemented.
 - The JSON file remains the local demo source of truth. MySQL mode persists the application state in `app_state` and rebuilds the existing relational snapshot. This does not yet make every new workflow a first-class normalized SQL model, and MySQL mode needs environment-specific integration testing before deployment.
 - No MFA/SSO, external identity provider, distributed job queue, formal CSRF token scheme, or production-grade object storage is included. The hourly reminder loop is persisted-data-based but runs inside the application process; use a dedicated durable worker for multi-instance production.
@@ -70,7 +77,7 @@ For production, also set `NODE_ENV=production`, a random `SESSION_SECRET` of at 
 
 ## Upgrade status
 
-The current ZIP builds on the existing project and preserves the existing UI styling and main pages. It adds employee-specific data access, a maximum of 100 unlinked seeded demo employees, approved-domain registration, email verification, employee invitations, evidence submission and review, in-app notifications, configurable evidence deadlines, reminders, and audit events. It also serializes persistence writes and enforces a strong session secret in production mode.
+The current ZIP builds on the existing project and preserves the existing UI styling and main pages. It adds employee-specific data access, a maximum of 100 unlinked seeded demo employees, approved-domain registration, Google OAuth sign-in, employee invitations, evidence submission and review, in-app notifications, configurable evidence deadlines, reminders, and audit events. It also serializes persistence writes and enforces a strong session secret in production mode.
 
 Remaining production work: execute browser-based desktop/mobile regression tests, verify MySQL behavior against a real configured database, add binary evidence upload with safe object storage, move reminders to a durable worker/queue for multi-instance deployment, add CSRF protection and distributed rate limiting, and complete security review before real employee data is used.
 
@@ -82,4 +89,4 @@ Run the included smoke/integration tests with:
 npm test
 ```
 
-The tests exercise the seeded employee cap, employee-specific dashboard data, cross-employee graph authorization, approved-domain registration, verification-before-login, and empty initial profiles for newly verified employees.
+The tests exercise the seeded employee cap, employee-specific dashboard data, cross-employee graph authorization, approved-domain registration without email verification, and empty initial profiles for newly created employees.
